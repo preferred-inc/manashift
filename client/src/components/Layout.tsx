@@ -142,7 +142,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       {/* Footer */}
       <footer className="border-t border-border/50 py-6 mt-16">
         <div className="container text-center text-sm text-muted-foreground">
-          <p>Transmemo — Transform any content into your preferred learning format</p>
+          <p>Manashift — Transform any content into your preferred learning format</p>
         </div>
       </footer>
     </div>

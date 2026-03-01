@@ -108,3 +108,9 @@ temp/
 
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
+
+# Drizzle migrations (auto-generated)
+drizzle/migrations/
+
+# Manus dev logs
+.manus-logs/

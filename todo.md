@@ -1,4 +1,4 @@
-# MelodyMind (Transmemo MVP) TODO
+# Manashift (Manashift MVP) TODO
 
 ## Phase 1: DB・サーバーサイド
 - [x] DBスキーマ設計（contents, tags, content_tags, likes, comments, bookmarks）
@@ -21,3 +21,8 @@
 ## Phase 3: 仕上げ
 - [x] Vitest テスト作成（13 tests passed）
 - [x] チェックポイント保存
+
+## Phase 4: アプリ名統一・GitHub Push
+- [ ] アプリ名を「Manashift」に一括置換（表示名・タイトル・README）
+- [ ] Preferred-Inc配下に新規リポジトリ作成
+- [ ] コードをPush

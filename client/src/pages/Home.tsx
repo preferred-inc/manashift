@@ -82,7 +82,7 @@ export default function Home() {
         </h1>
 
         <p className="text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
-          Paste text, upload an image, or drop a document — Transmemo transforms it into a{" "}
+          Paste text, upload an image, or drop a document — Manashift transforms it into a{" "}
           <strong className="text-foreground">novel, manga, flashcards, video script, or poem</strong>{" "}
           tailored to how you learn best.
         </p>
