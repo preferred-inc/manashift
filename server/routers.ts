@@ -393,6 +393,72 @@ function extractTextFromOutputData(outputData: string, format: string): string {
   }
 }
 
+// ─── Text extraction helpers (v1.2) ─────────────────────────────────────────
+
+async function extractTextFromImage(imageUrl: string): Promise<string> {
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはOCRスペシャリストです。画像からテキストを正確に読み取り、原文のまま書き起こしてください。表・リスト・数式がある場合はその構造を保持してください。画像にテキストがない場合は、画像の内容を詳細に説明してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "この画像からテキストを抽出してください。" },
+          { type: "image_url" as const, image_url: { url: imageUrl, detail: "high" as const } },
+        ],
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
+async function extractTextFromPdf(pdfUrl: string): Promise<string> {
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはドキュメント解析スペシャリストです。PDFの内容を正確にテキストとして書き起こしてください。見出し・段落・リスト・表の構造を可能な限り保持してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "このPDFの内容をテキストとして抽出してください。" },
+          { type: "file_url" as const, file_url: { url: pdfUrl, mime_type: "application/pdf" as const } },
+        ],
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
+async function extractTextFromUrl(url: string): Promise<string> {
+  // Fetch the URL content server-side
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Manashift/1.2 (content-extractor)" },
+  });
+  if (!response.ok) throw new Error(`Failed to fetch URL: ${response.status}`);
+
+  const html = await response.text();
+
+  // Use LLM to extract meaningful text from HTML
+  const truncatedHtml = html.slice(0, 30000); // Limit to avoid token overflow
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはWebコンテンツ抽出スペシャリストです。与えられたHTMLから、メインコンテンツのテキストを抽出してください。ナビゲーション・フッター・広告・スクリプトは除外してください。見出し・段落・リストの構造を保持してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: `以下のHTMLからメインコンテンツを抽出してください:\n\n${truncatedHtml}`,
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
 // ─── Routers ──────────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -480,6 +546,53 @@ export const appRouter = router({
         } catch (err) {
           await updateContent(contentId, { status: "failed" });
           throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Generation failed" });
+        }
+      }),
+
+    // ─── v1.2 Input extraction ─────────────────────────────────────────────
+    uploadFile: protectedProcedure
+      .input(
+        z.object({
+          fileBase64: z.string().min(1),
+          fileName: z.string().min(1),
+          mimeType: z.enum(["image/png", "image/jpeg", "image/webp", "application/pdf"]),
+        })
+      )
+      .mutation(async ({ input }) => {
+        const buffer = Buffer.from(input.fileBase64, "base64");
+        const ext = input.mimeType === "application/pdf" ? "pdf" : input.mimeType.split("/")[1];
+        const key = `uploads/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+        const { url } = await storagePut(key, buffer, input.mimeType);
+        return { url, mimeType: input.mimeType };
+      }),
+
+    extractText: protectedProcedure
+      .input(
+        z.object({
+          source: z.enum(["image", "pdf", "url"]),
+          url: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input }) => {
+        try {
+          let text: string;
+          switch (input.source) {
+            case "image":
+              text = await extractTextFromImage(input.url);
+              break;
+            case "pdf":
+              text = await extractTextFromPdf(input.url);
+              break;
+            case "url":
+              text = await extractTextFromUrl(input.url);
+              break;
+          }
+          return { text };
+        } catch (err) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Text extraction failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+          });
         }
       }),
 

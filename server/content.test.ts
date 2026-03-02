@@ -226,3 +226,44 @@ describe("content.discover - input validation", () => {
     ).rejects.toThrow();
   });
 });
+
+// ─── v1.2 Feature Tests ──────────────────────────────────────────────────────
+
+describe("content.uploadFile - auth & validation", () => {
+  it("uploadFile requires authentication", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(
+      caller.content.uploadFile({ fileBase64: "dGVzdA==", fileName: "test.png", mimeType: "image/png" })
+    ).rejects.toThrow();
+  });
+
+  it("uploadFile rejects invalid mimeType", async () => {
+    const caller = appRouter.createCaller(createAuthContext());
+    await expect(
+      caller.content.uploadFile({ fileBase64: "dGVzdA==", fileName: "test.txt", mimeType: "text/plain" as any })
+    ).rejects.toThrow();
+  });
+});
+
+describe("content.extractText - auth & validation", () => {
+  it("extractText requires authentication", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(
+      caller.content.extractText({ source: "url", url: "https://example.com" })
+    ).rejects.toThrow();
+  });
+
+  it("extractText rejects invalid source", async () => {
+    const caller = appRouter.createCaller(createAuthContext());
+    await expect(
+      caller.content.extractText({ source: "invalid" as any, url: "https://example.com" })
+    ).rejects.toThrow();
+  });
+
+  it("extractText rejects empty url", async () => {
+    const caller = appRouter.createCaller(createAuthContext());
+    await expect(
+      caller.content.extractText({ source: "image", url: "" })
+    ).rejects.toThrow();
+  });
+});
