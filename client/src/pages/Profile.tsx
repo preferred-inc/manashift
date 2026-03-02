@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { getLoginUrl } from "@/const";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -6,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Link, useParams } from "wouter";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Edit2, Check, X } from "lucide-react";
+import { Loader2, Edit2, Check, X, UserPlus, UserCheck } from "lucide-react";
 import ContentCard from "@/components/ContentCard";
 
 export default function Profile() {
@@ -32,6 +33,13 @@ export default function Profile() {
     onError: () => toast.error("Failed to update bio"),
   });
 
+  const followMutation = trpc.user.toggleFollow.useMutation({
+    onSuccess: (res) => {
+      utils.user.getProfile.invalidate({ userId });
+      toast.success(res.following ? "Followed!" : "Unfollowed");
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-96">
@@ -49,7 +57,7 @@ export default function Profile() {
     );
   }
 
-  const { user, contents } = data;
+  const { user, contents, followCounts, following } = data;
   const isOwnProfile = currentUser?.id === userId;
 
   const startEditBio = () => {
@@ -78,6 +86,24 @@ export default function Profile() {
                 onClick={startEditBio}
               >
                 <Edit2 className="w-3.5 h-3.5" />
+              </Button>
+            )}
+            {!isOwnProfile && (
+              <Button
+                variant={following ? "outline" : "default"}
+                size="sm"
+                className={`gap-1.5 ${following ? "border-primary/40 text-primary" : "bg-primary hover:bg-primary/90 text-primary-foreground"}`}
+                onClick={() => {
+                  if (!isAuthenticated) { window.location.href = getLoginUrl(); return; }
+                  followMutation.mutate({ userId });
+                }}
+                disabled={followMutation.isPending}
+              >
+                {following ? (
+                  <><UserCheck className="w-3.5 h-3.5" />Following</>
+                ) : (
+                  <><UserPlus className="w-3.5 h-3.5" />Follow</>
+                )}
               </Button>
             )}
           </div>
@@ -121,6 +147,12 @@ export default function Profile() {
           <div className="flex items-center gap-6 mt-4 text-sm text-muted-foreground">
             <span>
               <strong className="text-foreground">{contents.length}</strong> public works
+            </span>
+            <span>
+              <strong className="text-foreground">{followCounts.followers}</strong> followers
+            </span>
+            <span>
+              <strong className="text-foreground">{followCounts.following}</strong> following
             </span>
             <span>Joined {new Date(user.createdAt).toLocaleDateString("ja-JP", { year: "numeric", month: "long" })}</span>
           </div>

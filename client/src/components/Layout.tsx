@@ -11,11 +11,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { trpc } from "@/lib/trpc";
 import { Link, useLocation } from "wouter";
-import { Sparkles, Compass, BookOpen, LogOut, User, Plus } from "lucide-react";
+import { Sparkles, Compass, BookOpen, LogOut, User, Plus, Rss } from "lucide-react";
 import { toast } from "sonner";
 
 const NAV_LINKS = [
   { href: "/discover", label: "Discover", icon: Compass },
+  { href: "/feed", label: "Feed", icon: Rss },
   { href: "/library", label: "My Library", icon: BookOpen },
 ];
 

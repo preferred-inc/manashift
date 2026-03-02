@@ -15,14 +15,21 @@ import {
   getContentById,
   getContentTags,
   getComments,
+  getFollowCounts,
+  getRemixes,
   getUserById,
+  incrementRemixCount,
   incrementViewCount,
   isBookmarked,
+  isFollowing,
   isLiked,
+  listFollowingFeed,
+  listPopularTags,
   listPublicContents,
   listUserContents,
   setContentTags,
   toggleBookmark,
+  toggleFollow,
   toggleLike,
   updateContent,
   updateUserBio,
@@ -357,6 +364,101 @@ async function generatePoem(sourceText: string, title: string): Promise<string> 
   return (res.choices[0]?.message?.content as string) ?? "{}";
 }
 
+// ─── Remix text extraction ───────────────────────────────────────────────────
+
+function extractTextFromOutputData(outputData: string, format: string): string {
+  try {
+    const data = JSON.parse(outputData);
+    switch (format) {
+      case "novel":
+        return (data.chapters ?? []).map((ch: any) => `${ch.title}\n${ch.body}`).join("\n\n");
+      case "manga":
+        return (data.panels ?? [])
+          .map((p: any) => {
+            const dialogues = (p.dialogue ?? []).map((d: any) => `${d.character}: ${d.text}`).join("\n");
+            return `${p.description}\n${dialogues}`;
+          })
+          .join("\n\n");
+      case "flashcard":
+        return (data.cards ?? []).map((c: any) => `Q: ${c.question}\nA: ${c.answer}`).join("\n\n");
+      case "video_script":
+        return (data.scenes ?? []).map((s: any) => s.narration).join("\n\n");
+      case "poem":
+        return (data.stanzas ?? []).map((s: any) => (s.lines ?? []).join("\n")).join("\n\n");
+      default:
+        return outputData;
+    }
+  } catch {
+    return outputData;
+  }
+}
+
+// ─── Text extraction helpers (v1.2) ─────────────────────────────────────────
+
+async function extractTextFromImage(imageUrl: string): Promise<string> {
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはOCRスペシャリストです。画像からテキストを正確に読み取り、原文のまま書き起こしてください。表・リスト・数式がある場合はその構造を保持してください。画像にテキストがない場合は、画像の内容を詳細に説明してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "この画像からテキストを抽出してください。" },
+          { type: "image_url" as const, image_url: { url: imageUrl, detail: "high" as const } },
+        ],
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
+async function extractTextFromPdf(pdfUrl: string): Promise<string> {
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはドキュメント解析スペシャリストです。PDFの内容を正確にテキストとして書き起こしてください。見出し・段落・リスト・表の構造を可能な限り保持してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "このPDFの内容をテキストとして抽出してください。" },
+          { type: "file_url" as const, file_url: { url: pdfUrl, mime_type: "application/pdf" as const } },
+        ],
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
+async function extractTextFromUrl(url: string): Promise<string> {
+  // Fetch the URL content server-side
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Manashift/1.2 (content-extractor)" },
+  });
+  if (!response.ok) throw new Error(`Failed to fetch URL: ${response.status}`);
+
+  const html = await response.text();
+
+  // Use LLM to extract meaningful text from HTML
+  const truncatedHtml = html.slice(0, 30000); // Limit to avoid token overflow
+  const res = await invokeLLM({
+    messages: [
+      {
+        role: "system" as const,
+        content: "あなたはWebコンテンツ抽出スペシャリストです。与えられたHTMLから、メインコンテンツのテキストを抽出してください。ナビゲーション・フッター・広告・スクリプトは除外してください。見出し・段落・リストの構造を保持してください。結果はプレーンテキストのみで返してください。",
+      },
+      {
+        role: "user" as const,
+        content: `以下のHTMLからメインコンテンツを抽出してください:\n\n${truncatedHtml}`,
+      },
+    ],
+  });
+  return (res.choices[0]?.message?.content as string) ?? "";
+}
+
 // ─── Routers ──────────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -447,6 +549,53 @@ export const appRouter = router({
         }
       }),
 
+    // ─── v1.2 Input extraction ─────────────────────────────────────────────
+    uploadFile: protectedProcedure
+      .input(
+        z.object({
+          fileBase64: z.string().min(1),
+          fileName: z.string().min(1),
+          mimeType: z.enum(["image/png", "image/jpeg", "image/webp", "application/pdf"]),
+        })
+      )
+      .mutation(async ({ input }) => {
+        const buffer = Buffer.from(input.fileBase64, "base64");
+        const ext = input.mimeType === "application/pdf" ? "pdf" : input.mimeType.split("/")[1];
+        const key = `uploads/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+        const { url } = await storagePut(key, buffer, input.mimeType);
+        return { url, mimeType: input.mimeType };
+      }),
+
+    extractText: protectedProcedure
+      .input(
+        z.object({
+          source: z.enum(["image", "pdf", "url"]),
+          url: z.string().min(1),
+        })
+      )
+      .mutation(async ({ input }) => {
+        try {
+          let text: string;
+          switch (input.source) {
+            case "image":
+              text = await extractTextFromImage(input.url);
+              break;
+            case "pdf":
+              text = await extractTextFromPdf(input.url);
+              break;
+            case "url":
+              text = await extractTextFromUrl(input.url);
+              break;
+          }
+          return { text };
+        } catch (err) {
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Text extraction failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+          });
+        }
+      }),
+
     getById: publicProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ ctx, input }) => {
@@ -499,12 +648,21 @@ export const appRouter = router({
         z.object({
           format: z.enum(OUTPUT_FORMATS).optional(),
           keyword: z.string().optional(),
+          tagName: z.string().optional(),
+          sortBy: z.enum(["recent", "trending", "top"]).default("recent"),
+          period: z.enum(["week", "month", "all"]).default("all"),
           limit: z.number().min(1).max(50).default(20),
           offset: z.number().default(0),
         })
       )
       .query(async ({ input }) => {
         return listPublicContents(input);
+      }),
+
+    popularTags: publicProcedure
+      .input(z.object({ limit: z.number().min(1).max(50).default(20) }).optional())
+      .query(async ({ input }) => {
+        return listPopularTags(input?.limit ?? 20);
       }),
 
     // ─── My library ───────────────────────────────────────────────────────
@@ -555,18 +713,110 @@ export const appRouter = router({
     myBookmarks: protectedProcedure.query(async ({ ctx }) => {
       return getBookmarkedContents(ctx.user.id);
     }),
+
+    // ─── Remix ──────────────────────────────────────────────────────────
+    remix: protectedProcedure
+      .input(
+        z.object({
+          contentId: z.number(),
+          targetFormat: z.enum(OUTPUT_FORMATS),
+          title: z.string().min(1).max(255).optional(),
+          tags: z.array(z.string()).max(5).default([]),
+          isPublic: z.boolean().default(false),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const original = await getContentById(input.contentId);
+        if (!original) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!original.isPublic && original.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        if (input.targetFormat === original.outputFormat) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Target format must differ from original" });
+        }
+
+        const sourceText = extractTextFromOutputData(original.outputData, original.outputFormat);
+        const title = input.title ?? `${original.title} (${input.targetFormat.replace("_", " ")})`;
+
+        const contentId = await createContent({
+          userId: ctx.user.id,
+          title,
+          description: `Remixed from "${original.title}"`,
+          sourceText,
+          outputFormat: input.targetFormat,
+          outputData: "{}",
+          isPublic: input.isPublic,
+          status: "generating",
+          parentContentId: original.id,
+        });
+
+        try {
+          let outputData: string;
+          switch (input.targetFormat) {
+            case "novel":
+              outputData = await generateNovel(sourceText, title);
+              break;
+            case "manga":
+              const mangaResult = await generateManga(sourceText, title);
+              outputData = mangaResult.data;
+              break;
+            case "flashcard":
+              outputData = await generateFlashcards(sourceText, title);
+              break;
+            case "video_script":
+              outputData = await generateVideoScript(sourceText, title);
+              break;
+            case "poem":
+              outputData = await generatePoem(sourceText, title);
+              break;
+            default:
+              throw new Error("Unsupported format");
+          }
+
+          let coverImageUrl: string | undefined;
+          try {
+            const coverPrompt = `${input.targetFormat} cover art for "${title}", artistic, colorful, educational, modern illustration style`;
+            const { url } = await generateImage({ prompt: coverPrompt });
+            coverImageUrl = url;
+          } catch {}
+
+          await updateContent(contentId, { outputData, coverImageUrl, status: "completed" });
+          if (input.tags.length > 0) await setContentTags(contentId, input.tags);
+          await incrementRemixCount(original.id);
+
+          return { contentId, status: "completed" };
+        } catch (err) {
+          await updateContent(contentId, { status: "failed" });
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Remix generation failed" });
+        }
+      }),
+
+    getRemixes: publicProcedure
+      .input(z.object({ contentId: z.number() }))
+      .query(async ({ input }) => {
+        return getRemixes(input.contentId);
+      }),
+
+    // ─── Feed ───────────────────────────────────────────────────────────
+    feed: protectedProcedure
+      .input(z.object({ limit: z.number().min(1).max(50).default(20), offset: z.number().default(0) }))
+      .query(async ({ ctx, input }) => {
+        return listFollowingFeed(ctx.user.id, input);
+      }),
   }),
 
   // ─── User profile ──────────────────────────────────────────────────────────
   user: router({
     getProfile: publicProcedure
       .input(z.object({ userId: z.number() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const user = await getUserById(input.userId);
         if (!user) throw new TRPCError({ code: "NOT_FOUND" });
         const userContents = await listUserContents(input.userId, { limit: 20 });
         const publicContents = userContents.filter((c) => c.isPublic && c.status === "completed");
-        return { user, contents: publicContents };
+        const followCounts = await getFollowCounts(input.userId);
+        const following = ctx.user ? await isFollowing(ctx.user.id, input.userId) : false;
+        return { user, contents: publicContents, followCounts, following };
       }),
 
     updateBio: protectedProcedure
@@ -574,6 +824,16 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await updateUserBio(ctx.user.id, input.bio);
         return { success: true };
+      }),
+
+    toggleFollow: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.id === input.userId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot follow yourself" });
+        }
+        const following = await toggleFollow(ctx.user.id, input.userId);
+        return { following };
       }),
   }),
 });

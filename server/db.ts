@@ -1,9 +1,10 @@
-import { and, desc, eq, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, like, or, sql, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   Bookmark,
   Comment,
   Content,
+  Follow,
   InsertContent,
   InsertUser,
   Like,
@@ -12,6 +13,7 @@ import {
   comments,
   contentTags,
   contents,
+  follows,
   likes,
   tags,
   users,
@@ -131,6 +133,8 @@ export async function listPublicContents(opts: {
   format?: string;
   tagName?: string;
   keyword?: string;
+  sortBy?: "recent" | "trending" | "top";
+  period?: "week" | "month" | "all";
   limit?: number;
   offset?: number;
 }) {
@@ -139,7 +143,41 @@ export async function listPublicContents(opts: {
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
 
-  let query = db
+  // If filtering by tag, find matching content IDs first
+  let tagContentIds: number[] | undefined;
+  if (opts.tagName) {
+    const tagRows = await db
+      .select({ contentId: contentTags.contentId })
+      .from(contentTags)
+      .innerJoin(tags, eq(contentTags.tagId, tags.id))
+      .where(eq(tags.name, opts.tagName));
+    tagContentIds = tagRows.map((r) => r.contentId);
+    if (tagContentIds.length === 0) return [];
+  }
+
+  // Period filter
+  let periodFilter;
+  if (opts.period && opts.period !== "all") {
+    const now = new Date();
+    const daysAgo = opts.period === "week" ? 7 : 30;
+    const since = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+    periodFilter = gte(contents.createdAt, since);
+  }
+
+  // Sort order
+  let orderClause;
+  switch (opts.sortBy) {
+    case "trending":
+      orderClause = desc(sql`(${contents.likeCount} * 3 + ${contents.viewCount} + ${contents.commentCount} * 2)`);
+      break;
+    case "top":
+      orderClause = desc(contents.likeCount);
+      break;
+    default:
+      orderClause = desc(contents.createdAt);
+  }
+
+  return db
     .select({
       content: contents,
       author: { id: users.id, name: users.name },
@@ -156,14 +194,31 @@ export async function listPublicContents(opts: {
               like(contents.title, `%${opts.keyword}%`),
               like(contents.description, `%${opts.keyword}%`)
             )
-          : undefined
+          : undefined,
+        tagContentIds ? inArray(contents.id, tagContentIds) : undefined,
+        periodFilter
       )
     )
-    .orderBy(desc(contents.createdAt))
+    .orderBy(orderClause)
     .limit(limit)
     .offset(offset);
+}
 
-  return query;
+// List popular tags (by content count)
+export async function listPopularTags(limit: number = 20) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      tag: tags,
+      count: sql<number>`count(${contentTags.contentId})`.as("content_count"),
+    })
+    .from(tags)
+    .innerJoin(contentTags, eq(tags.id, contentTags.tagId))
+    .innerJoin(contents, and(eq(contentTags.contentId, contents.id), eq(contents.isPublic, true), eq(contents.status, "completed")))
+    .groupBy(tags.id)
+    .orderBy(desc(sql`content_count`))
+    .limit(limit);
 }
 
 // List user's own contents
@@ -324,4 +379,109 @@ export async function getComments(contentId: number) {
     .innerJoin(users, eq(comments.userId, users.id))
     .where(eq(comments.contentId, contentId))
     .orderBy(desc(comments.createdAt));
+}
+
+// ─── Remix ───────────────────────────────────────────────────────────────────
+
+export async function incrementRemixCount(contentId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(contents).set({ remixCount: sql`${contents.remixCount} + 1` }).where(eq(contents.id, contentId));
+}
+
+export async function getRemixes(contentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      content: contents,
+      author: { id: users.id, name: users.name },
+    })
+    .from(contents)
+    .innerJoin(users, eq(contents.userId, users.id))
+    .where(and(eq(contents.parentContentId, contentId), eq(contents.isPublic, true), eq(contents.status, "completed")))
+    .orderBy(desc(contents.createdAt));
+}
+
+// ─── Follows ─────────────────────────────────────────────────────────────────
+
+export async function toggleFollow(userId: number, followedUserId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  if (userId === followedUserId) throw new Error("Cannot follow yourself");
+
+  const existing = await db
+    .select()
+    .from(follows)
+    .where(and(eq(follows.userId, userId), eq(follows.followedUserId, followedUserId)))
+    .limit(1);
+
+  if (existing[0]) {
+    await db.delete(follows).where(and(eq(follows.userId, userId), eq(follows.followedUserId, followedUserId)));
+    return false;
+  } else {
+    await db.insert(follows).values({ userId, followedUserId });
+    return true;
+  }
+}
+
+export async function isFollowing(userId: number, followedUserId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db
+    .select()
+    .from(follows)
+    .where(and(eq(follows.userId, userId), eq(follows.followedUserId, followedUserId)))
+    .limit(1);
+  return !!result[0];
+}
+
+export async function getFollowCounts(userId: number): Promise<{ followers: number; following: number }> {
+  const db = await getDb();
+  if (!db) return { followers: 0, following: 0 };
+  const [followerRows] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(follows)
+    .where(eq(follows.followedUserId, userId));
+  const [followingRows] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(follows)
+    .where(eq(follows.userId, userId));
+  return {
+    followers: Number(followerRows?.count ?? 0),
+    following: Number(followingRows?.count ?? 0),
+  };
+}
+
+export async function listFollowingFeed(userId: number, opts?: { limit?: number; offset?: number }) {
+  const db = await getDb();
+  if (!db) return [];
+  const limit = opts?.limit ?? 20;
+  const offset = opts?.offset ?? 0;
+
+  // Get IDs of followed users
+  const followedRows = await db
+    .select({ followedUserId: follows.followedUserId })
+    .from(follows)
+    .where(eq(follows.userId, userId));
+  const followedIds = followedRows.map((r) => r.followedUserId);
+  if (followedIds.length === 0) return [];
+
+  return db
+    .select({
+      content: contents,
+      author: { id: users.id, name: users.name },
+    })
+    .from(contents)
+    .innerJoin(users, eq(contents.userId, users.id))
+    .where(
+      and(
+        inArray(contents.userId, followedIds),
+        eq(contents.isPublic, true),
+        eq(contents.status, "completed")
+      )
+    )
+    .orderBy(desc(contents.createdAt))
+    .limit(limit)
+    .offset(offset);
 }

@@ -46,6 +46,9 @@ export const contents = mysqlTable("contents", {
   status: mysqlEnum("status", ["pending", "generating", "completed", "failed"])
     .default("pending")
     .notNull(),
+  // Remix
+  parentContentId: int("parentContentId"),
+  remixCount: int("remixCount").default(0).notNull(),
   // Stats
   viewCount: int("viewCount").default(0).notNull(),
   likeCount: int("likeCount").default(0).notNull(),
@@ -104,3 +107,13 @@ export const bookmarks = mysqlTable("bookmarks", {
 });
 
 export type Bookmark = typeof bookmarks.$inferSelect;
+
+// Follows
+export const follows = mysqlTable("follows", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  followedUserId: int("followedUserId").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type Follow = typeof follows.$inferSelect;

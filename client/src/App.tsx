@@ -10,6 +10,7 @@ import Discover from "./pages/Discover";
 import Library from "./pages/Library";
 import ContentDetail from "./pages/ContentDetail";
 import Profile from "./pages/Profile";
+import Feed from "./pages/Feed";
 import Layout from "./components/Layout";
 
 function Router() {
@@ -19,6 +20,7 @@ function Router() {
         <Route path="/" component={Home} />
         <Route path="/create" component={Create} />
         <Route path="/discover" component={Discover} />
+        <Route path="/feed" component={Feed} />
         <Route path="/library" component={Library} />
         <Route path="/content/:id" component={ContentDetail} />
         <Route path="/profile/:id" component={Profile} />

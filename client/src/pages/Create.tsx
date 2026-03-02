@@ -7,10 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { trpc } from "@/lib/trpc";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
-import { Sparkles, Loader2, X, Lock, Globe } from "lucide-react";
+import { Sparkles, Loader2, X, Lock, Globe, Type, Image, FileText, Link2, Upload, Check } from "lucide-react";
 
 const OUTPUT_FORMATS = [
   { value: "novel", label: "📖 Novel", desc: "Short story format" },
@@ -21,6 +21,15 @@ const OUTPUT_FORMATS = [
 ] as const;
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number]["value"];
+
+const INPUT_MODES = [
+  { value: "text", label: "Text", icon: Type, desc: "Paste text directly" },
+  { value: "image", label: "Image", icon: Image, desc: "Upload photo of notes" },
+  { value: "pdf", label: "PDF", icon: FileText, desc: "Upload a PDF document" },
+  { value: "url", label: "URL", icon: Link2, desc: "Extract from a webpage" },
+] as const;
+
+type InputMode = (typeof INPUT_MODES)[number]["value"];
 
 export default function Create() {
   const { isAuthenticated } = useAuth();
@@ -34,6 +43,13 @@ export default function Create() {
   const [tagInput, setTagInput] = useState("");
   const [tags, setTags] = useState<string[]>([]);
 
+  // v1.2 input mode state
+  const [inputMode, setInputMode] = useState<InputMode>("text");
+  const [urlInput, setUrlInput] = useState("");
+  const [uploadedFileName, setUploadedFileName] = useState("");
+  const [uploadedFileUrl, setUploadedFileUrl] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const generateMutation = trpc.content.generate.useMutation({
     onSuccess: (data) => {
       toast.success("Content generated successfully!");
@@ -42,6 +58,22 @@ export default function Create() {
     onError: (err) => {
       toast.error("Generation failed: " + err.message);
     },
+  });
+
+  const uploadMutation = trpc.content.uploadFile.useMutation({
+    onSuccess: (data) => {
+      setUploadedFileUrl(data.url);
+      toast.success("File uploaded!");
+    },
+    onError: () => toast.error("Upload failed"),
+  });
+
+  const extractMutation = trpc.content.extractText.useMutation({
+    onSuccess: (data) => {
+      setSourceText(data.text);
+      toast.success("Text extracted! Review and edit below.");
+    },
+    onError: (err) => toast.error("Extraction failed: " + err.message),
   });
 
   if (!isAuthenticated) {
@@ -76,6 +108,56 @@ export default function Create() {
     }
   };
 
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+      toast.error("File too large (max 10MB)");
+      return;
+    }
+
+    const validTypes = inputMode === "image"
+      ? ["image/png", "image/jpeg", "image/webp"]
+      : ["application/pdf"];
+    if (!validTypes.includes(file.type)) {
+      toast.error(`Invalid file type. Expected: ${validTypes.join(", ")}`);
+      return;
+    }
+
+    setUploadedFileName(file.name);
+
+    // Convert to base64
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = (reader.result as string).split(",")[1];
+      uploadMutation.mutate({
+        fileBase64: base64,
+        fileName: file.name,
+        mimeType: file.type as any,
+      });
+    };
+    reader.readAsDataURL(file);
+  }, [inputMode, uploadMutation]);
+
+  const handleExtractText = () => {
+    if (inputMode === "url") {
+      if (!urlInput.trim()) {
+        toast.error("Please enter a URL");
+        return;
+      }
+      extractMutation.mutate({ source: "url", url: urlInput.trim() });
+    } else if (uploadedFileUrl) {
+      extractMutation.mutate({
+        source: inputMode as "image" | "pdf",
+        url: uploadedFileUrl,
+      });
+    } else {
+      toast.error("Please upload a file first");
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sourceText.trim()) {
@@ -86,6 +168,7 @@ export default function Create() {
   };
 
   const isLoading = generateMutation.isPending;
+  const isExtracting = extractMutation.isPending || uploadMutation.isPending;
 
   return (
     <div className="container py-12 max-w-3xl">
@@ -111,22 +194,181 @@ export default function Create() {
           />
         </div>
 
-        {/* Source text */}
-        <div className="space-y-2">
-          <Label htmlFor="sourceText" className="text-sm font-medium">
-            Content to transform <span className="text-destructive">*</span>
-          </Label>
-          <Textarea
-            id="sourceText"
-            placeholder="Paste your text here — notes, articles, study material, anything you want to transform..."
-            value={sourceText}
-            onChange={(e) => setSourceText(e.target.value)}
-            className="bg-card border-border/60 focus:border-primary/60 min-h-48 resize-none"
-            maxLength={10000}
-            disabled={isLoading}
-          />
-          <p className="text-xs text-muted-foreground text-right">{sourceText.length}/10000</p>
+        {/* Input mode selector */}
+        <div className="space-y-3">
+          <Label className="text-sm font-medium">Input source</Label>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {INPUT_MODES.map((mode) => {
+              const Icon = mode.icon;
+              return (
+                <button
+                  key={mode.value}
+                  type="button"
+                  onClick={() => setInputMode(mode.value)}
+                  disabled={isLoading}
+                  className={`flex flex-col items-center gap-1.5 rounded-xl border p-3 text-center transition-all ${
+                    inputMode === mode.value
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border/60 bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground"
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span className="text-xs font-medium">{mode.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
+
+        {/* Input area - changes based on mode */}
+        {inputMode === "text" ? (
+          <div className="space-y-2">
+            <Label htmlFor="sourceText" className="text-sm font-medium">
+              Content to transform <span className="text-destructive">*</span>
+            </Label>
+            <Textarea
+              id="sourceText"
+              placeholder="Paste your text here — notes, articles, study material, anything you want to transform..."
+              value={sourceText}
+              onChange={(e) => setSourceText(e.target.value)}
+              className="bg-card border-border/60 focus:border-primary/60 min-h-48 resize-none"
+              maxLength={10000}
+              disabled={isLoading}
+            />
+            <p className="text-xs text-muted-foreground text-right">{sourceText.length}/10000</p>
+          </div>
+        ) : inputMode === "url" ? (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">
+                Web page URL <span className="text-destructive">*</span>
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="https://example.com/article"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  className="bg-card border-border/60 focus:border-primary/60"
+                  disabled={isLoading || isExtracting}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="gap-2 shrink-0 border-primary/40 text-primary hover:bg-primary/10"
+                  onClick={handleExtractText}
+                  disabled={isLoading || isExtracting || !urlInput.trim()}
+                >
+                  {isExtracting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Link2 className="w-4 h-4" />
+                  )}
+                  Extract
+                </Button>
+              </div>
+            </div>
+            {sourceText && (
+              <div className="space-y-2">
+                <Label className="text-sm font-medium flex items-center gap-2">
+                  <Check className="w-4 h-4 text-green-500" />
+                  Extracted text (review & edit)
+                </Label>
+                <Textarea
+                  value={sourceText}
+                  onChange={(e) => setSourceText(e.target.value)}
+                  className="bg-card border-border/60 focus:border-primary/60 min-h-48 resize-none"
+                  maxLength={10000}
+                  disabled={isLoading}
+                />
+                <p className="text-xs text-muted-foreground text-right">{sourceText.length}/10000</p>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Image / PDF upload */
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">
+                Upload {inputMode === "image" ? "image" : "PDF"} <span className="text-destructive">*</span>
+              </Label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={inputMode === "image" ? "image/png,image/jpeg,image/webp" : "application/pdf"}
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+              <div
+                className={`flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-8 transition-all cursor-pointer hover:border-primary/40 ${
+                  uploadedFileUrl
+                    ? "border-green-500/40 bg-green-500/5"
+                    : "border-border/60 bg-card"
+                }`}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {uploadMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                    <p className="text-sm text-muted-foreground">Uploading...</p>
+                  </>
+                ) : uploadedFileUrl ? (
+                  <>
+                    <Check className="w-8 h-8 text-green-500" />
+                    <p className="text-sm font-medium">{uploadedFileName}</p>
+                    <p className="text-xs text-muted-foreground">Click to replace</p>
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-8 h-8 text-muted-foreground" />
+                    <p className="text-sm text-muted-foreground">
+                      {inputMode === "image"
+                        ? "Drop an image here or click to upload (PNG, JPG, WebP)"
+                        : "Drop a PDF here or click to upload"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">Max 10MB</p>
+                  </>
+                )}
+              </div>
+              {uploadedFileUrl && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full gap-2 border-primary/40 text-primary hover:bg-primary/10"
+                  onClick={handleExtractText}
+                  disabled={isExtracting}
+                >
+                  {isExtracting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Extracting text with AI...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      Extract text from {inputMode === "image" ? "image" : "PDF"}
+                    </>
+                  )}
+                </Button>
+              )}
+            </div>
+            {sourceText && (
+              <div className="space-y-2">
+                <Label className="text-sm font-medium flex items-center gap-2">
+                  <Check className="w-4 h-4 text-green-500" />
+                  Extracted text (review & edit)
+                </Label>
+                <Textarea
+                  value={sourceText}
+                  onChange={(e) => setSourceText(e.target.value)}
+                  className="bg-card border-border/60 focus:border-primary/60 min-h-48 resize-none"
+                  maxLength={10000}
+                  disabled={isLoading}
+                />
+                <p className="text-xs text-muted-foreground text-right">{sourceText.length}/10000</p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Output format */}
         <div className="space-y-3">
