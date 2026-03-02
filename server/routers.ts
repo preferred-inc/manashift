@@ -15,14 +15,21 @@ import {
   getContentById,
   getContentTags,
   getComments,
+  getFollowCounts,
+  getRemixes,
   getUserById,
+  incrementRemixCount,
   incrementViewCount,
   isBookmarked,
+  isFollowing,
   isLiked,
+  listFollowingFeed,
+  listPopularTags,
   listPublicContents,
   listUserContents,
   setContentTags,
   toggleBookmark,
+  toggleFollow,
   toggleLike,
   updateContent,
   updateUserBio,
@@ -357,6 +364,35 @@ async function generatePoem(sourceText: string, title: string): Promise<string> 
   return (res.choices[0]?.message?.content as string) ?? "{}";
 }
 
+// ─── Remix text extraction ───────────────────────────────────────────────────
+
+function extractTextFromOutputData(outputData: string, format: string): string {
+  try {
+    const data = JSON.parse(outputData);
+    switch (format) {
+      case "novel":
+        return (data.chapters ?? []).map((ch: any) => `${ch.title}\n${ch.body}`).join("\n\n");
+      case "manga":
+        return (data.panels ?? [])
+          .map((p: any) => {
+            const dialogues = (p.dialogue ?? []).map((d: any) => `${d.character}: ${d.text}`).join("\n");
+            return `${p.description}\n${dialogues}`;
+          })
+          .join("\n\n");
+      case "flashcard":
+        return (data.cards ?? []).map((c: any) => `Q: ${c.question}\nA: ${c.answer}`).join("\n\n");
+      case "video_script":
+        return (data.scenes ?? []).map((s: any) => s.narration).join("\n\n");
+      case "poem":
+        return (data.stanzas ?? []).map((s: any) => (s.lines ?? []).join("\n")).join("\n\n");
+      default:
+        return outputData;
+    }
+  } catch {
+    return outputData;
+  }
+}
+
 // ─── Routers ──────────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -499,12 +535,21 @@ export const appRouter = router({
         z.object({
           format: z.enum(OUTPUT_FORMATS).optional(),
           keyword: z.string().optional(),
+          tagName: z.string().optional(),
+          sortBy: z.enum(["recent", "trending", "top"]).default("recent"),
+          period: z.enum(["week", "month", "all"]).default("all"),
           limit: z.number().min(1).max(50).default(20),
           offset: z.number().default(0),
         })
       )
       .query(async ({ input }) => {
         return listPublicContents(input);
+      }),
+
+    popularTags: publicProcedure
+      .input(z.object({ limit: z.number().min(1).max(50).default(20) }).optional())
+      .query(async ({ input }) => {
+        return listPopularTags(input?.limit ?? 20);
       }),
 
     // ─── My library ───────────────────────────────────────────────────────
@@ -555,18 +600,110 @@ export const appRouter = router({
     myBookmarks: protectedProcedure.query(async ({ ctx }) => {
       return getBookmarkedContents(ctx.user.id);
     }),
+
+    // ─── Remix ──────────────────────────────────────────────────────────
+    remix: protectedProcedure
+      .input(
+        z.object({
+          contentId: z.number(),
+          targetFormat: z.enum(OUTPUT_FORMATS),
+          title: z.string().min(1).max(255).optional(),
+          tags: z.array(z.string()).max(5).default([]),
+          isPublic: z.boolean().default(false),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const original = await getContentById(input.contentId);
+        if (!original) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!original.isPublic && original.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        if (input.targetFormat === original.outputFormat) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Target format must differ from original" });
+        }
+
+        const sourceText = extractTextFromOutputData(original.outputData, original.outputFormat);
+        const title = input.title ?? `${original.title} (${input.targetFormat.replace("_", " ")})`;
+
+        const contentId = await createContent({
+          userId: ctx.user.id,
+          title,
+          description: `Remixed from "${original.title}"`,
+          sourceText,
+          outputFormat: input.targetFormat,
+          outputData: "{}",
+          isPublic: input.isPublic,
+          status: "generating",
+          parentContentId: original.id,
+        });
+
+        try {
+          let outputData: string;
+          switch (input.targetFormat) {
+            case "novel":
+              outputData = await generateNovel(sourceText, title);
+              break;
+            case "manga":
+              const mangaResult = await generateManga(sourceText, title);
+              outputData = mangaResult.data;
+              break;
+            case "flashcard":
+              outputData = await generateFlashcards(sourceText, title);
+              break;
+            case "video_script":
+              outputData = await generateVideoScript(sourceText, title);
+              break;
+            case "poem":
+              outputData = await generatePoem(sourceText, title);
+              break;
+            default:
+              throw new Error("Unsupported format");
+          }
+
+          let coverImageUrl: string | undefined;
+          try {
+            const coverPrompt = `${input.targetFormat} cover art for "${title}", artistic, colorful, educational, modern illustration style`;
+            const { url } = await generateImage({ prompt: coverPrompt });
+            coverImageUrl = url;
+          } catch {}
+
+          await updateContent(contentId, { outputData, coverImageUrl, status: "completed" });
+          if (input.tags.length > 0) await setContentTags(contentId, input.tags);
+          await incrementRemixCount(original.id);
+
+          return { contentId, status: "completed" };
+        } catch (err) {
+          await updateContent(contentId, { status: "failed" });
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Remix generation failed" });
+        }
+      }),
+
+    getRemixes: publicProcedure
+      .input(z.object({ contentId: z.number() }))
+      .query(async ({ input }) => {
+        return getRemixes(input.contentId);
+      }),
+
+    // ─── Feed ───────────────────────────────────────────────────────────
+    feed: protectedProcedure
+      .input(z.object({ limit: z.number().min(1).max(50).default(20), offset: z.number().default(0) }))
+      .query(async ({ ctx, input }) => {
+        return listFollowingFeed(ctx.user.id, input);
+      }),
   }),
 
   // ─── User profile ──────────────────────────────────────────────────────────
   user: router({
     getProfile: publicProcedure
       .input(z.object({ userId: z.number() }))
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
         const user = await getUserById(input.userId);
         if (!user) throw new TRPCError({ code: "NOT_FOUND" });
         const userContents = await listUserContents(input.userId, { limit: 20 });
         const publicContents = userContents.filter((c) => c.isPublic && c.status === "completed");
-        return { user, contents: publicContents };
+        const followCounts = await getFollowCounts(input.userId);
+        const following = ctx.user ? await isFollowing(ctx.user.id, input.userId) : false;
+        return { user, contents: publicContents, followCounts, following };
       }),
 
     updateBio: protectedProcedure
@@ -574,6 +711,16 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await updateUserBio(ctx.user.id, input.bio);
         return { success: true };
+      }),
+
+    toggleFollow: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.id === input.userId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot follow yourself" });
+        }
+        const following = await toggleFollow(ctx.user.id, input.userId);
+        return { following };
       }),
   }),
 });

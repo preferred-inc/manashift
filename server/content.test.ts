@@ -165,3 +165,64 @@ describe("user router - input validation", () => {
     await expect(caller.user.updateBio({ bio: "hello" })).rejects.toThrow();
   });
 });
+
+// ─── v1.1 Feature Tests ──────────────────────────────────────────────────────
+
+describe("content.remix - auth protection", () => {
+  it("remix requires authentication", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(
+      caller.content.remix({ contentId: 1, targetFormat: "flashcard", tags: [], isPublic: false })
+    ).rejects.toThrow();
+  });
+
+  it("remix rejects invalid targetFormat", async () => {
+    const caller = appRouter.createCaller(createAuthContext());
+    await expect(
+      caller.content.remix({ contentId: 1, targetFormat: "invalid" as any, tags: [], isPublic: false })
+    ).rejects.toThrow();
+  });
+
+  it("remix rejects too many tags", async () => {
+    const caller = appRouter.createCaller(createAuthContext());
+    await expect(
+      caller.content.remix({ contentId: 1, targetFormat: "novel", tags: ["a", "b", "c", "d", "e", "f"], isPublic: false })
+    ).rejects.toThrow();
+  });
+});
+
+describe("content.feed - auth protection", () => {
+  it("feed requires authentication", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(caller.content.feed({ limit: 10, offset: 0 })).rejects.toThrow();
+  });
+});
+
+describe("user.toggleFollow - auth protection", () => {
+  it("toggleFollow requires authentication", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(caller.user.toggleFollow({ userId: 2 })).rejects.toThrow();
+  });
+
+  it("toggleFollow rejects self-follow", async () => {
+    const caller = appRouter.createCaller(createAuthContext({ id: 1 }));
+    await expect(caller.user.toggleFollow({ userId: 1 })).rejects.toThrow();
+  });
+});
+
+describe("content.discover - input validation", () => {
+  it("discover accepts sortBy parameter", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    // Should not throw with valid sortBy
+    await expect(
+      caller.content.discover({ sortBy: "invalid_sort" as any, limit: 10, offset: 0, period: "all" })
+    ).rejects.toThrow();
+  });
+
+  it("discover accepts period parameter", async () => {
+    const caller = appRouter.createCaller(createPublicContext());
+    await expect(
+      caller.content.discover({ sortBy: "trending", period: "invalid_period" as any, limit: 10, offset: 0 })
+    ).rejects.toThrow();
+  });
+});

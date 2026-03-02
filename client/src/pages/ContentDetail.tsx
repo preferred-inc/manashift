@@ -8,7 +8,9 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Link, useParams } from "wouter";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Heart, Bookmark, MessageCircle, Eye, ArrowLeft, Loader2, Send, Trash2, Globe, Lock } from "lucide-react";
+import { Heart, Bookmark, MessageCircle, Eye, ArrowLeft, Loader2, Send, Trash2, Globe, Lock, Shuffle, GitFork } from "lucide-react";
+import { useLocation } from "wouter";
+import ContentCard from "@/components/ContentCard";
 
 // ─── Format Viewers ────────────────────────────────────────────────────────────
 
@@ -226,15 +228,26 @@ function ContentViewer({ format, outputData }: { format: string; outputData: str
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+const REMIX_FORMATS = [
+  { value: "novel", label: "📖 Novel" },
+  { value: "manga", label: "🎌 Manga" },
+  { value: "flashcard", label: "🃏 Flashcard" },
+  { value: "video_script", label: "🎬 Video Script" },
+  { value: "poem", label: "✍️ Poem" },
+] as const;
+
 export default function ContentDetail() {
   const params = useParams<{ id: string }>();
   const id = parseInt(params.id ?? "0");
   const { user, isAuthenticated } = useAuth();
   const utils = trpc.useUtils();
+  const [, navigate] = useLocation();
   const [commentText, setCommentText] = useState("");
+  const [showRemixMenu, setShowRemixMenu] = useState(false);
 
   const { data, isLoading, error } = trpc.content.getById.useQuery({ id }, { enabled: !!id });
   const { data: comments, isLoading: commentsLoading } = trpc.content.getComments.useQuery({ contentId: id }, { enabled: !!id });
+  const { data: remixes } = trpc.content.getRemixes.useQuery({ contentId: id }, { enabled: !!id });
 
   const likeMutation = trpc.content.toggleLike.useMutation({
     onSuccess: (res) => {
@@ -248,6 +261,14 @@ export default function ContentDetail() {
       utils.content.getById.invalidate({ id });
       toast.success(res.bookmarked ? "Bookmarked!" : "Removed from bookmarks");
     },
+  });
+
+  const remixMutation = trpc.content.remix.useMutation({
+    onSuccess: (res) => {
+      toast.success("Remix created!");
+      navigate(`/content/${res.contentId}`);
+    },
+    onError: () => toast.error("Remix failed"),
   });
 
   const commentMutation = trpc.content.addComment.useMutation({
@@ -364,14 +385,80 @@ export default function ContentDetail() {
               <Bookmark className={`w-4 h-4 ${bookmarked ? "fill-current" : ""}`} />
               Save
             </Button>
+            {/* Remix button */}
+            <div className="relative">
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2 border-border/60 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                onClick={() => {
+                  if (!isAuthenticated) { window.location.href = getLoginUrl(); return; }
+                  setShowRemixMenu(!showRemixMenu);
+                }}
+                disabled={remixMutation.isPending}
+              >
+                {remixMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Shuffle className="w-4 h-4" />
+                )}
+                Remix
+                {(content as any).remixCount > 0 && <span className="text-xs opacity-70">{(content as any).remixCount}</span>}
+              </Button>
+              {showRemixMenu && (
+                <div className="absolute right-0 top-full mt-2 z-50 bg-card border border-border/60 rounded-xl shadow-xl p-2 min-w-44">
+                  <p className="text-xs text-muted-foreground px-3 py-1.5 font-medium">Convert to:</p>
+                  {REMIX_FORMATS
+                    .filter((f) => f.value !== content.outputFormat)
+                    .map((f) => (
+                      <button
+                        key={f.value}
+                        className="w-full text-left px-3 py-2 rounded-lg text-sm hover:bg-muted/50 transition-colors"
+                        onClick={() => {
+                          setShowRemixMenu(false);
+                          remixMutation.mutate({ contentId: id, targetFormat: f.value, isPublic: true });
+                        }}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Remix source link */}
+      {(content as any).parentContentId && (
+        <div className="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+          <GitFork className="w-4 h-4" />
+          <span>Remixed from</span>
+          <Link href={`/content/${(content as any).parentContentId}`}>
+            <span className="text-primary hover:underline cursor-pointer">original content</span>
+          </Link>
+        </div>
+      )}
 
       {/* Content viewer */}
       <div className="rounded-2xl border border-border/60 bg-card p-8 mb-10">
         <ContentViewer format={content.outputFormat} outputData={content.outputData} />
       </div>
+
+      {/* Remixes */}
+      {remixes && remixes.length > 0 && (
+        <div className="mb-10">
+          <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
+            <Shuffle className="w-5 h-5" />
+            Remixes ({remixes.length})
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {remixes.map((item) => (
+              <ContentCard key={item.content.id} content={item.content} author={item.author} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Source text (collapsed) */}
       <details className="mb-10 rounded-xl border border-border/60 bg-card">
